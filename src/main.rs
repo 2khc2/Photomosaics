@@ -1,8 +1,6 @@
 use color_eyre::Result;
-use image::{
-     io::Reader as ImageReader, DynamicImage,  GenericImage,
-    GenericImageView,  RgbImage,
-};
+use image::{io::Reader as ImageReader, DynamicImage, GenericImage, GenericImageView, RgbImage};
+use std::{cmp::min, fs};
 
 const TEST_PATH: &str = "img/test.png";
 
@@ -12,8 +10,8 @@ struct PixelBlock {
     b: u8,
     width: u32,
     height: u32,
-    x: u32,
-    y: u32,
+    x: Option<u32>,
+    y: Option<u32>,
 }
 
 struct DynamicImageCrop {
@@ -22,7 +20,7 @@ struct DynamicImageCrop {
     y: u32,
 }
 
-fn avg_color(img: &mut DynamicImage, size: u32) -> Vec<PixelBlock> {
+fn divide_to_squares(img: &mut DynamicImage, size: u32) -> Vec<DynamicImageCrop> {
     let mut squares: Vec<DynamicImageCrop> = vec![];
     let steps = size as usize;
     for i in (size..img.width()).step_by(steps) {
@@ -34,6 +32,34 @@ fn avg_color(img: &mut DynamicImage, size: u32) -> Vec<PixelBlock> {
             });
         }
     }
+    squares
+}
+
+fn avg_color(img: &mut DynamicImage, size: u32) -> PixelBlock {
+    let _avg_pixels: Vec<PixelBlock> = vec![];
+    let num_pixels = size * size;
+    let mut r = 0;
+    let mut g = 0;
+    let mut b = 0;
+    for p in img.pixels() {
+        r += p.2[0] as u32;
+        g += p.2[1] as u32;
+        b += p.2[2] as u32;
+    }
+    PixelBlock {
+        r: (r / num_pixels) as u8,
+        g: (g / num_pixels) as u8,
+        b: (b / num_pixels) as u8,
+        width: size,
+        height: size,
+        x: None,
+        y: None,
+    }
+}
+
+fn div_avg_color(img: &mut DynamicImage, size: u32) -> Vec<PixelBlock> {
+    let squares = divide_to_squares(img, size);
+
     let mut avg_pixels: Vec<PixelBlock> = vec![];
     let num_pixels = size * size;
     for s in squares {
@@ -45,45 +71,82 @@ fn avg_color(img: &mut DynamicImage, size: u32) -> Vec<PixelBlock> {
             g += p.2[1] as u32;
             b += p.2[2] as u32;
         }
-        // println!("{} {} {}", r / num_pixels, g / num_pixels, b / num_pixels);
         avg_pixels.push(PixelBlock {
             r: (r / num_pixels) as u8,
             g: (g / num_pixels) as u8,
             b: (b / num_pixels) as u8,
             width: size,
             height: size,
-            x: s.x,
-            y: s.y,
+            x: Some(s.x),
+            y: Some(s.y),
         })
     }
     avg_pixels
 }
 
-fn pixellate(blocks: Vec<PixelBlock>, w:u32, h:u32) -> Result<()> {
-    // let block_h = blocks[0].height;
-    // let block_w = blocks[0].width;
+fn pixellate(blocks: Vec<PixelBlock>, w: u32, h: u32) -> Result<()> {
     let mut rbg_img = RgbImage::new(w, h);
 
     for block in blocks {
-        // rbg_img.copy_from(other, x, y)
-        let mut rgb_block = RgbImage::new(block.width,block.height);
+        let mut rgb_block = RgbImage::new(block.width, block.height);
         for pixel in rgb_block.pixels_mut() {
             pixel[0] = block.r;
             pixel[1] = block.g;
             pixel[2] = block.b;
         }
-        rbg_img.copy_from(&rgb_block, block.x, block.y)?;
+        rbg_img.copy_from(&rgb_block, block.x.unwrap(), block.y.unwrap())?;
     }
     Ok(rbg_img.save(TEST_PATH)?)
 }
 
+fn square_crop(mut img: DynamicImage) -> DynamicImage {
+    let size = min(img.width(), img.height());
+    img.crop(0, 0, size, size)
+}
+
 fn main() -> Result<()> {
-    let size = 200;
+    let size = 80;
 
     let mut img = ImageReader::open("img/fox.jpg")?.decode()?;
-    let blocks = avg_color(&mut img, size);
-    pixellate(blocks,img.width(), img.height())?;
+    let blocks = div_avg_color(&mut img, size);
+    // pixellate(blocks,img.width(), img.height())?;
 
+    let source_fp = fs::read_dir("./img/source/").unwrap();
+
+    let mut src_imgs: Vec<RgbImage> = vec![];
+    let mut avg_src_color: Vec<PixelBlock> = vec![];
+    for path in source_fp {
+
+        // println!("Name: {}", path.unwrap().path().display());
+
+        let img = ImageReader::open(path.unwrap().path())?.decode()?;
+        let mut cropped = square_crop(img);
+        let cropped_rgb = cropped.to_rgb8();
+        src_imgs.push(cropped_rgb.clone());
+        avg_src_color.push(avg_color(&mut cropped, cropped_rgb.height()));
+    }
+
+    let mut photomosaic = RgbImage::new(img.width(), img.height());
+
+    for orig_block in blocks {
+        let mut diff = u32::MAX;
+        let mut idx = 0;
+        for (i, src_pb) in avg_src_color.iter().enumerate() {
+            let distance = f32::sqrt(
+                (
+                    (src_pb.r as f32 - orig_block.r  as f32).powi(2 )
+                    + (src_pb.g as f32 - orig_block.g as f32).powi( 2)
+                     + (src_pb.b as f32 - orig_block.b as f32).powi(2)
+                    ).sqrt()
+            ) as u32;
+            if distance < diff {
+                diff = distance;
+                idx = i;
+            }
+        }
+        photomosaic.copy_from(&src_imgs[idx], orig_block.x.unwrap(), orig_block.y.unwrap())?;
+    }
+    photomosaic.save(TEST_PATH)?;
 
     // img.crop(x, y, width, height)
 
